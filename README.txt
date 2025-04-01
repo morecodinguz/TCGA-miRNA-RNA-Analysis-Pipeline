@@ -1,15 +1,47 @@
-1. Run the entire code (lympho_meta_xmiseq.RMD).
-You may face with some errors because the environment of my desktop and yours is different.
-You may have to install some packages to run the code properly.
+## Description
+This repository provides an automated pipeline for downloading, preprocessing, analyzing, and preparing TCGA (The Cancer Genome Atlas) miRNA and RNA expression data for bioinformatics and machine learning analyses. It specifically targets metastasis classification such as lymph node (LNM) and distant metastasis (DM).
 
-2. If you able to run the entire code successfully, now you should analyze the code chunk by chunk.
-Also, you have to compare the code with the content of the paper 
-(Predicting Lymph Node Metastasis and Distant Metastasis using Differential Correlations of miRNAs and Their Target RNAs in Cancer), 
-and understand the outline of the framewark.
-Figure. 1 in the paper will be useful.
+## Pipeline Workflow
+- **Data Acquisition:** Downloads RNA and miRNA expression data from TCGA using TCGAbiolinks.
+- **Data Preprocessing:**
+  - Clinical data cleaning
+  - Separation of normal and tumor samples
+  - Gene expression normalization (TMM normalization)
+- **Correlation Analysis:** Pearson correlation coefficient calculations for miRNA-RNA pairs
+- **Statistical Analysis:** Wilcoxon tests to identify significant miRNA-RNA interactions
+- **Machine Learning Preparation:** Generation of input datasets ready for predictive modeling
 
-*You don't need to analyze the entire functions in the code. But if you want to understand more details, you should.*
+## Requirements
 
-*If you have any problem that you can't handle yourself, please ask me.*
- 
- 
+### R Dependencies
+Install via CRAN and Bioconductor:
+
+```R
+install.packages(c("beepr", "readxl", "dplyr", "DT", "stringr", "doParallel", "data.table", "limma", "psych", "corpcor", "ggplot2", "purrr", "NetworkToolbox", "reticulate", "RMySQL", "reshape2", "spatstat", "gplots", "RColorBrewer", "pROC", "pheatmap", "enrichR", "progress", "tidyr"))
+
+BiocManager::install(c("TCGAbiolinks", "SummarizedExperiment", "edgeR", "miRBaseConverter"))
+```
+
+```
+
+## Folder Structure
+```
+.
+├── plots/                # Directory for generated plots
+├── target/               # Directory for target databases
+├── tcga_data/            # Main directory containing processed data
+│   └── [Cancer_Type]/    # Specific cancer datasets (e.g., HNSC)
+├── tmp/                  # Temporary files
+├── function2.R           # Main R functions for data processing
+├── annotation.csv        # Annotation reference file
+└── README.md             # Documentation
+```
+
+## Output Files
+- Normalized and filtered miRNA and RNA expression matrices
+- Lists of significant miRNA-RNA correlation pairs
+- Final datasets suitable for machine learning (e.g., `ml_input.csv`)
+
+## Notes
+- Customize correlation (`pcc_filter`) and statistical test (`wilcox_pval`) thresholds as needed.
+- Ensure sufficient computational resources due to the heavy data processing involved.
