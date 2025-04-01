@@ -1,0 +1,357 @@
+
+```{r setup, include=FALSE}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("edgeR")
+
+# BiocManager::install("BioinformaticsFMRP/TCGAbiolinksGUI.data")
+# BiocManager::install("BioinformaticsFMRP/TCGAbiolinks")
+
+dir<-getwd()
+
+setwd(dir) 
+
+library(beepr)
+library(readxl)
+library(TCGAbiolinks)
+library(dplyr)
+library(DT)
+library(SummarizedExperiment)
+library(stringr)
+library(doParallel)
+library(data.table)
+library(limma)
+library(stringi)
+library(parallel)
+library(psych)
+library(ggm)
+library(corpcor)
+library(ggplot2)
+library(purrr)
+library(NetworkToolbox)
+library(reticulate)
+library(RMySQL)
+library(reshape2)
+library(spatstat)
+library(gplots)
+library(RColorBrewer)
+library(pROC)
+library(pheatmap)
+library(hpar)
+library(enrichR)
+library(progress)
+library(tidyr)
+
+
+source("function2.R") 
+
+
+cancer_types<-c("HNSC") #set cancer types that you want to analyze, ex)cancer_types<-c("HNSC","STAD",...)
+classes<-c("positive","negative")
+predict_obj<-"lnm" #lnm: lymph node metastasis classification, dm: distant metastasis classification
+
+#thresholds for filtering
+pcc_filter<-0.4
+wilcox_pval<-0.01
+```
+
+```{r, include=FALSE}
+#create directory
+dir.create("plots")
+dir.create("target")
+dir.create("tcga_data")
+dir.create("tmp")
+setwd(str_c(dir,"\\tcga_data"))
+for ( i in cancer_types ){
+  dir.create(i)
+}
+```
+
+```{r, include=FALSE}
+#download TCGA data
+for (i in 1:length(cancer_types)){
+  download_TCGA(cancer_types[i],str_c(dir,"\\tcga_data\\",cancer_types[i])) 
+}
+```
+
+```{r,include=FALSE}
+#preprocessing the clinical files
+for (i in cancer_types){
+  pre_clinic(str_c(dir,'\\tcga_data\\',i,'\\TCGA-',i,'-clinical.csv')) 
+}
+```
+
+```{python, include=FALSE}
+#sort tcga data into normal, tumor samples
+import csv
+import re
+from itertools import product
+import time
+cancer_types_py=r.cancer_types
+if len(cancer_types_py)==4:
+  cancer_types_py=[cancer_types_py]
+dir_py=r.dir
+
+#miRNA preproccessing
+for cancer_type_py in cancer_types_py:
+    f = open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\TCGA-',cancer_type_py,'-miRNA.csv']), 'r', encoding='utf-8') 
+    rdr = list(csv.reader(f))
+    rdrt=list( zip(*rdr))
+    with open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\tmp_miRNA.csv']), 'w', newline='') as f: 
+        writer = csv.writer(f)
+        writer.writerow(rdrt[0])
+        for ele in rdrt[1:]:
+            if ele[0][13]=='1':
+                writer.writerow(ele)
+        for ele in rdrt[1:]:
+            if ele[0][13]=='0':
+                writer.writerow(ele)
+    f.close()
+    f = open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\tmp_miRNA.csv']), 'r', encoding='utf-8')
+    rdr = list(csv.reader(f))
+    rdrt=list( zip(*rdr))
+    with open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\miRNAMatrix.csv']), 'w', newline='') as f:
+        writer = csv.writer(f)
+        for ele in rdrt:
+            writer.writerow(ele)
+    f.close()
+    time.sleep(1)
+
+#RNA preproccessing
+for cancer_type_py in cancer_types_py:    
+    f = open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\TCGA-',cancer_type_py,'-Counts.csv']), 'r', encoding='utf-8')
+    rdr = csv.reader(f)
+    rdrt=list( zip(*rdr))
+    with open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\tmp_RNA.csv']), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(rdrt[0])
+        for ele in rdrt[1:]:
+            if ele[0][13]=='1':
+                writer.writerow(ele)
+        for ele in rdrt[1:]:
+            if ele[0][13]=='0':
+                writer.writerow(ele)
+    f.close()
+    f = open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\tmp_RNA.csv']), 'r', encoding='utf-8')
+    rdr = list(csv.reader(f))
+    rdrt=list( zip(*rdr))
+    with open(''.join([dir_py,'\\tcga_data\\',cancer_type_py,'\\RNAMatrix.csv']), 'w', newline='') as f:
+        writer = csv.writer(f)
+        for ele in rdrt:
+            writer.writerow(ele)
+    f.close()
+    time.sleep(1)
+quit()
+```
+
+```{r, include=FALSE}
+#further preprocessing
+pb <- progress_bar$new(total = length(cancer_types))
+for (i in cancer_types){
+  file.remove(str_c(dir,'\\tcga_data\\',i,'\\tmp_miRNA.csv'))
+  file.remove(str_c(dir,'\\tcga_data\\',i,'\\tmp_RNA.csv'))
+  
+  manipul_mat(str_c(dir,'\\tcga_data\\',i,'\\miRNAMatrix.csv'),sep=',',input='id',1,1)
+  manipul_mat(str_c(dir,'\\tcga_data\\',i,'\\RNAMatrix.csv'),sep=',',input='id',1,1)
+  
+  pb$tick()
+}
+```
+
+```{r,include=FALSE}
+#pick solid tissue samples
+for (i in cancer_types){
+  pick_solid(str_c(dir,"\\tcga_data\\",i,"\\RNAMatrix.csv"))
+}
+```
+
+```{r,include=FALSE}
+#tmm normalization & filtering low expressed genes
+pb <- progress_bar$new(total = length(cancer_types))
+for (i in cancer_types){
+  normalized<-round(tmm(str_c(dir,'\\tcga_data\\',i,'\\RNAMatrix.csv'), op="do"),8)
+  write.csv(normalized,str_c(dir,'\\tcga_data\\',i,'\\normalized_RNAMatrix.csv'))
+  
+  pb$tick()
+}
+rm(normalized)
+```
+
+```{r,include=FALSE}
+ref<-read.csv(str_c(dir,"\\annotation.csv"),header = T,check.names = F)
+for (i in cancer_types){
+  dt<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\normalized_RNAMatrix.csv"),row.names=1,check.names=F)
+  dt<-dt[row.names(dt)%in%ref[,1],]
+  vec<-row.names(dt)
+  id_tab<-geneid_converter(vec, ref = ref)
+  row.names(dt)<-id_tab[,1]
+  RNA_id<-id_tab[str_detect(id_tab[,2],'protein_coding') | str_detect(id_tab[,2],'lncRNA') | str_detect(id_tab[,2],'pseudogene'),]
+  miRNA_id<-id_tab[str_detect(id_tab[,2],'miRNA'),]
+  RNA<-dt[row.names(dt)%in%RNA_id[,1],] #mRNA, lncRNA, pseudogene
+  miRNA<-dt[row.names(dt)%in%miRNA_id[,1],]
+  
+  fwrite(RNA,str_c(dir,"\\tcga_data\\",i,"\\normalized_rna.csv"),sep = ',',row.names = T,quote = F)
+  fwrite(miRNA,str_c(dir,"\\tcga_data\\",i,"\\normalized_mi.csv"),sep = ',',row.names = T,quote = F)
+}
+rm(dt,ref,vec,id_tab,RNA_id,miRNA_id,RNA,miRNA)
+```
+
+```{r,include=FALSE}
+#separate normal and tumor samples
+for (i in cancer_types){
+  dt<-separate_normal(str_c(dir,"\\tcga_data\\",i,"\\normalized_rna.csv"))
+  fwrite(dt,str_c(dir,"\\tcga_data\\",i,"\\normal_normalized_rna.csv"),sep = ',',row.names = T,quote = F)
+  remove_normal(str_c(dir,"\\tcga_data\\",i,"\\normalized_rna.csv"))
+  
+  dt<-separate_normal(str_c(dir,"\\tcga_data\\",i,"\\normalized_mi.csv"))
+  fwrite(dt,str_c(dir,"\\tcga_data\\",i,"\\normal_normalized_mi.csv"),sep = ',',row.names = T,quote = F)
+  remove_normal(str_c(dir,"\\tcga_data\\",i,"\\normalized_mi.csv"))
+}
+```
+
+```{r,include=FALSE}
+#select samples which are common to clinical file
+for (i in cancer_types){
+  colname_slice(str_c(dir,'\\tcga_data\\',i,'\\normalized_rna.csv'),1,12) #cut colnames
+  colname_slice(str_c(dir,'\\tcga_data\\',i,'\\normalized_mi.csv'),1,12)
+}
+pb <- progress_bar$new(total = length(cancer_types))
+for (i in cancer_types){
+  #intersect rna and clinical
+  df<-read.csv(str_c(dir,'\\tcga_data\\',i,'\\normalized_rna.csv'),row.names = 1, check.names = F)
+  df<-df[,!duplicated(colnames(df))]
+  clinic<-read.csv(str_c(dir,'\\tcga_data\\',i,'\\TCGA-',i,'-clinical.csv'),row.names = 1, check.names = F)
+  inter<-intersect(colnames(df),clinic[,1])
+  df<-df[,colnames(df)%in%inter]
+  write.csv(df,str_c(dir,'\\tcga_data\\',i,'\\normalized_rna.csv'),quote = F)
+  
+  #intersect miRNA and clinical
+  df<-read.csv(str_c(dir,'\\tcga_data\\',i,'\\normalized_mi.csv'),row.names = 1, check.names = F)
+  df<-df[,!duplicated(colnames(df))]
+  inter<-intersect(colnames(df),clinic[,1])
+  df<-df[,colnames(df)%in%inter]
+  write.csv(df,str_c(dir,'\\tcga_data\\',i,'\\normalized_mi.csv'),quote = F)
+  
+  clinic<-clinic[clinic[,1]%in%inter,]
+  write.csv(clinic,str_c(dir,'\\tcga_data\\',i,'\\TCGA-',i,'-clinical.csv'),quote = F)
+  
+  pb$tick()
+}
+rm(df,clinic,inter,dt)
+```
+
+```{r,include=FALSE}
+#separate tumor samples based on TNM stage index
+for (i in cancer_types){
+  tnm_separator(dir = str_c(dir,'\\tcga_data\\',i,'\\normalized_rna.csv') #counts
+                      ,clinic_dir = str_c(dir,'\\tcga_data\\',i,'\\TCGA-',i,'-clinical.csv')
+                      ,setwd = str_c(dir,'\\tcga_data\\',i), op=predict_obj)
+  tnm_separator(dir = str_c(dir,'\\tcga_data\\',i,'\\normalized_mi.csv') #miRNAs
+                      ,clinic_dir = str_c(dir,'\\tcga_data\\',i,'\\TCGA-',i,'-clinical.csv')
+                      ,setwd = str_c(dir,'\\tcga_data\\',i), op=predict_obj)
+}
+for (i in cancer_types){
+  for (j in classes){
+    colname_add(str_c(dir,'\\tcga_data\\',i,'\\',j,'_normalized_rna.csv'),'-01')
+    colname_add(str_c(dir,'\\tcga_data\\',i,'\\',j,'_normalized_mi.csv'),'-01')
+  }
+}
+```
+
+```{r,include=FALSE}
+#calculate PCC of miRNA-RNA pairs and remove miRNA-RNA pair with |PCC|=<0.4
+pb <- progress_bar$new(total = length(cancer_types))
+for (i in cancer_types){
+  for (j in classes){
+    mi<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\",j,"_normalized_mi.csv"),row.names = 1,check.names = F)
+    rna<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\",j,"_normalized_rna.csv"),row.names = 1, check.names = F)
+    
+    id<-rownames(mi)
+    target<-rownames(rna)
+    
+    pair<-tidyr::crossing(id, target)
+    pair<-cal_correlation(pair,mi,rna,pcc_filter)
+    
+    mi<-mi[rownames(mi)%in%unique(pair[,1]),]
+    fwrite(mi,str_c(dir,"\\tcga_data\\",i,"\\",j,"_corr_validated_mi.csv"),sep = ',',row.names = T,quote = F)
+    
+    rna<-rna[rownames(rna)%in%unique(pair[,2]),]
+    fwrite(rna,str_c(dir,"\\tcga_data\\",i,"\\",j,"_corr_validated_rna.csv"),sep = ',',row.names = T,quote = F)
+    
+    write.csv(pair,str_c(dir,"\\tcga_data\\",i,"\\",j,"_miRNA-RNA_pair.csv"),row.names=F,quote=F)
+  }
+  pb$tick()
+}
+rm(mi,rna,pair,id,target)
+```
+
+```{r,include=FALSE}
+#remove miRNA-RNA pairs whcih are common to both positive and negative sample set
+for (i in cancer_types){
+  positive<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\positive_miRNA-RNA_pair.csv"), check.names = F)[,1:2]
+  negative<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\negative_miRNA-RNA_pair.csv"), check.names = F)[,1:2]
+  
+  admat<-unique(rbind(positive,negative))
+  inter<-inner_join(positive, negative)
+  admat<-dplyr::setdiff(admat,inter)
+  
+  write.csv(admat,str_c(dir,"\\tcga_data\\",i,"\\admat.csv"),row.names = F,quote = F)
+  
+  cat(str_c("intersect: ",nrow(inter)))
+}
+rm(positive,negative,admat,inter)
+```
+
+```{r,include=FALSE}
+#generate label (postivie and negative) file
+for (i in cancer_types){
+  positive<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\positive_corr_validated_mi.csv"),row.names = 1,check.names = F)
+  p_label<-cbind(colnames(positive),rep(1,ncol(positive)))
+  
+  negative<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\negative_corr_validated_mi.csv"),row.names = 1,check.names = F)
+  n_label<-cbind(colnames(negative),rep(0,ncol(negative)))
+  
+  tab_label<-rbind(p_label,n_label)
+  colnames(tab_label)<-c("sample_id","labels")
+  write.csv(tab_label,str_c(dir,"\\tcga_data\\",i,"\\tab_label.csv"),row.names = F,quote = F)
+}
+rm(positive,negative,p_label,n_label,tab_label)
+```
+
+```{r, include=FALSE}
+#calculate delta PCC & perform wilcoxon test & derive input file for machine learning
+for (i in cancer_types){
+  admat<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\admat.csv"),check.names=F)
+  
+  positive_rna<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\positive_normalized_rna.csv"),row.names = 1, check.names = F)
+  negative_rna<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\negative_normalized_rna.csv"),row.names = 1, check.names = F)
+
+  positive_mi<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\positive_normalized_mi.csv"),row.names = 1, check.names = F)
+  negative_mi<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\negative_normalized_mi.csv"),row.names = 1, check.names = F)
+  
+  normal_rna<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\normal_normalized_rna.csv"),row.names = 1, check.names = F)
+  normal_mi<-read.csv(str_c(dir,"\\tcga_data\\",i,"\\normal_normalized_mi.csv"),row.names = 1, check.names = F)
+  
+  positive_delta<-cal_delta_pcc(admat,normal_rna,normal_mi,positive_rna,positive_mi)
+  negative_delta<-cal_delta_pcc(admat,normal_rna,normal_mi,negative_rna,negative_mi)
+  
+  wilcox<-delta_wilcox_test(positive_delta,negative_delta,wilcox_pval)
+  write.csv(wilcox,str_c(dir,"\\tcga_data\\",i,"\\wilcox.csv"),quote=F,row.names=F)
+  
+  row.names(wilcox)<-str_c(wilcox[,1],"_",wilcox[,2])
+  positive_delta<-na.omit(positive_delta)
+  row.names(positive_delta)<-str_c(positive_delta[,1],"_",positive_delta[,2])
+  negative_delta<-na.omit(negative_delta)
+  row.names(negative_delta)<-str_c(negative_delta[,1],"_",negative_delta[,2])
+  
+  positive_delta<-positive_delta[row.names(positive_delta)%in%row.names(wilcox),]
+  negative_delta<-negative_delta[row.names(negative_delta)%in%row.names(wilcox),]
+  negative_delta<-negative_delta[,3:ncol(negative_delta)]
+  
+  ml_input<-merge(positive_delta,negative_delta,by="row.names")
+  ml_input<-ml_input[,-1]
+  
+  write.csv(ml_input,str_c(dir,"\\tcga_data\\",i,"\\ml_input.csv"),quote=F,row.names=F)
+}
+```
